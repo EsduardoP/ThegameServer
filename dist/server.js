@@ -12,8 +12,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.nivelUsuario = void 0;
 const express_1 = __importDefault(require("express"));
+const axios_1 = __importDefault(require("axios"));
 const secuences_model_1 = require("./models/secuences.model");
 const db_1 = require("./db");
 const mongoose_1 = __importDefault(require("mongoose"));
@@ -137,38 +137,40 @@ wss.on('connection', (ws) => {
     let connectedUserName = '';
     ws.on('message', (data) => __awaiter(void 0, void 0, void 0, function* () {
         const parsedMessage = JSON.parse(data);
-        if (parsedMessage.type === 'nickname') {
+        if (parsedMessage.type === 'player') {
             const playerName = parsedMessage.nickname;
+            const playerPasswd = parsedMessage.passwd;
             // Verificar si el usuario ya está registrado
-            const existingPlayer = yield Player.findOne({ name: playerName }).exec();
-            if (existingPlayer) {
-                console.log('Jugador ya registrado:', playerName);
-                ws.send(JSON.stringify({ type: 'error', message: 'Nickname already taken' }));
-                connectedClientsMap.set(playerName, { ws, playerId: existingPlayer._id });
-                notifyAllClients("connectedPlayers", connectedUsers);
+            const loginPlayerName = yield Player.findOne({ name: playerName }).exec();
+            if (loginPlayerName) {
+                if (loginPlayerName.passwd === playerPasswd) {
+                    ws.send(JSON.stringify({ type: 'reconnect', message: 'Reconexion exitosa' }));
+                    connectedClientsMap.set(playerName, { ws, playerId: loginPlayerName._id });
+                    notifyAllClients("connectedPlayers", connectedUsers);
+                    const mensajeReconexion = `Se reconecto ${playerName}`;
+                    yield enviarNotificacionDiscord(mensajeReconexion);
+                    updateAndSendScores();
+                }
+                else {
+                    ws.send(JSON.stringify({ type: 'error', message: 'Nombre de usuario o contraseña incorrecto' }));
+                }
             }
             else {
                 connectedUserName = parsedMessage.nickname;
                 const newPlayer = new Player({
                     id: new mongoose_1.default.Types.ObjectId(),
                     name: playerName,
+                    passwd: playerPasswd
                 });
+                const mensajeReconexion = `Se conecto ${playerName}`;
+                yield enviarNotificacionDiscord(mensajeReconexion);
                 connectedUsers.push(newPlayer);
                 yield newPlayer.save();
                 connectedClientsMap.set(parsedMessage.nickname, { ws, playerId: newPlayer._id });
                 notificarNuevoPlayer(newPlayer);
-                console.log('Nuevo jugador guardado en la base de datos:', playerName);
+                ws.send(JSON.stringify({ type: 'register', message: 'Jugador registrado' }));
                 notifyAllClients("connectedPlayers", connectedUsers);
-                const jugadores = yield player_model_1.default.Player.find({}, "name score");
-                const jugador = jugadores.map(jugador => ({ name: jugador.name, score: jugador.score }));
-                const jugadoress = yield player_model_1.default.Player.find({}, "name");
-                const jugadorr = jugadoress.map(jugador => ({ name: jugador.name }));
-                const scores = `event: scores\n` + `data: ${JSON.stringify(jugador)}\n\n`;
-                const playIn = `event: playIn\n` + `data: ${JSON.stringify(jugadorr)}\n\n`;
-                for (let client of allClients) {
-                    client.write(scores);
-                    client.write(playIn);
-                }
+                updateAndSendScores();
             }
         }
         switch (parsedMessage.action) {
@@ -184,9 +186,9 @@ wss.on('connection', (ws) => {
                 if (userSession) {
                     if (usuarioConectado) {
                         const nivelUsuario = usuarioConectado.level;
-                        console.log("Nivel del usuario:", nivelUsuario);
-                        generatedKeys = (0, secuences_model_1.generateLevelData)(nivelUsuario).keys;
-                        generatedScore = (0, secuences_model_1.generateLevelData)(nivelUsuario).score;
+                        const { keys, score } = (0, secuences_model_1.generateLevelData)(nivelUsuario);
+                        generatedKeys = keys;
+                        generatedScore = score;
                         ws.send(JSON.stringify({
                             event: "startGaming",
                             data: generatedKeys
@@ -202,12 +204,15 @@ wss.on('connection', (ws) => {
                 const generatedKeysString = JSON.stringify(generatedKeys);
                 const Session = connectedClientsMap.get(connectedUserName);
                 let updatedLives = 0;
+                let updatedLevel = 0;
+                let updatedScore = 0;
                 if (pressedKeysString === generatedKeysString) {
                     if (Session) {
                         yield player_model_1.default.Player.updateOne({ _id: Session.playerId }, { $inc: { score: generatedScore, level: 1 } });
-                        console.log('Puntuación y nivel actualizados para el usuario:', connectedUserName);
+                        // Obtener el usuario actualizado
                         const updatedUser = yield player_model_1.default.Player.findById(Session.playerId);
                         updatedLives = updatedUser ? updatedUser.lives : 0;
+                        updatedLevel = updatedUser ? updatedUser.level : 0;
                     }
                     else {
                         console.log('Las teclas coinciden pero el usuario no está registrado.');
@@ -215,24 +220,24 @@ wss.on('connection', (ws) => {
                 }
                 else {
                     if (Session) {
-                        console.log('Las teclas no coinciden. Se restará una vida al usuario.');
                         // Reducir una vida del usuario
-                        yield player_model_1.default.Player.updateOne({ _id: Session.playerId }, { $inc: { lives: -1 } } // Decrementar en 1 la cantidad de vidas
-                        );
-                        // Obtener la cantidad actualizada de vidas del usuario
+                        yield player_model_1.default.Player.updateOne({ _id: Session.playerId }, { $inc: { lives: -1 } });
                         const updatedUser = yield player_model_1.default.Player.findById(Session.playerId);
                         updatedLives = updatedUser ? updatedUser.lives : 0;
-                        console.log('Cantidad de vidas actualizada para el usuario:', connectedUserName);
+                        updatedLevel = updatedUser ? updatedUser.level : 0;
+                        updatedScore = updatedUser ? updatedUser.score : 0;
                     }
                     else {
                         console.log('Las teclas no coinciden o el usuario no está registrado.');
                     }
                 }
+                const mensajeReconexion = `${connectedUserName} con ${updatedLives} vidas`;
+                yield enviarNotificacionDiscord(mensajeReconexion);
                 ws.send(JSON.stringify({
                     event: "lives-",
                     data: { lives: updatedLives }
                 }));
-                // Enviar la cantidad actualizada de vidas al cliente
+                updateAndSendScores();
                 break;
             case "lives":
                 const userLivesSession = connectedClientsMap.get(connectedUserName);
@@ -251,7 +256,7 @@ wss.on('connection', (ws) => {
                 break;
         }
     }));
-    ws.on('close', () => {
+    ws.on('close', () => __awaiter(void 0, void 0, void 0, function* () {
         console.log("Cliente desconectado.");
         connectedClients--;
         const userSession = connectedClientsMap.get(connectedUserName);
@@ -260,6 +265,8 @@ wss.on('connection', (ws) => {
             if (disconnectedUserIndex !== -1) {
                 connectedUsers.splice(disconnectedUserIndex, 1);
                 notifyAllClients("connectedPlayers", connectedUsers);
+                const mensajeReconexion = `${connectedUserName} se desconecto`;
+                yield enviarNotificacionDiscord(mensajeReconexion);
             }
             else {
                 console.log("Usuario no encontrado en la lista de usuarios conectados.");
@@ -269,7 +276,7 @@ wss.on('connection', (ws) => {
         else {
             console.log("Sesión de usuario no encontrada.");
         }
-    });
+    }));
 });
 const notifyAllClients = (event, data) => {
     wss.clients.forEach(client => {
@@ -279,6 +286,27 @@ const notifyAllClients = (event, data) => {
         }
     });
 };
+const updateAndSendScores = () => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const jugadoress = yield player_model_1.default.Player.find({}, "name score");
+        const jugadorr = jugadoress.map(jugador => ({ name: jugador.name, score: jugador.score }));
+        const scores = `event: scores\n` + `data: ${JSON.stringify(jugadoress)}\n\n`;
+        const playIn = `event: playIn\n` + `data: ${JSON.stringify(jugadorr)}\n\n`;
+        for (let client of allClients) {
+            client.write(scores);
+            client.write(playIn);
+        }
+    }
+    catch (error) {
+        console.error("Error al actualizar y enviar los datos de los jugadores:", error);
+    }
+});
+const enviarNotificacionDiscord = (mensaje) => __awaiter(void 0, void 0, void 0, function* () {
+    const webhookUrl = 'https://discord.com/api/webhooks/1252772820145012837/rta89Wa-cY4NQeOXEakOiBWHvDespeS71yqlA_Vn2A7yFnz3K4XX1dNbvU22egD5hzE6';
+    yield axios_1.default.post(webhookUrl, {
+        content: mensaje
+    });
+});
 server.listen(desiredPort, () => {
     console.log(`Server running in port:  ${desiredPort}`);
 });

@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import axios from 'axios';
 import { Player, ConnectedUser } from './models/Interfaces'; 
 import { generateLevelData } from './models/secuences.model';
 import { connectDB } from './db';
@@ -149,46 +150,39 @@ wss.on('connection', (ws: WebSocket) => {
 
   ws.on('message', async (data: string) => {
     const parsedMessage = JSON.parse(data);
-    if (parsedMessage.type === 'nickname') {
+    if (parsedMessage.type === 'player') {
       const playerName = parsedMessage.nickname;
+      const playerPasswd = parsedMessage.passwd
       // Verificar si el usuario ya está registrado
-      const existingPlayer = await Player.findOne({ name: playerName }).exec();
-      if (existingPlayer) {
-        console.log('Jugador ya registrado:', playerName);
-        ws.send(JSON.stringify({ type: 'error', message: 'Nickname already taken' }));
-        connectedClientsMap.set(playerName, { ws, playerId: existingPlayer._id });
-        notifyAllClients("connectedPlayers", connectedUsers);
+      const loginPlayerName = await Player.findOne({ name: playerName }).exec();
+      if (loginPlayerName) {
+        if (loginPlayerName.passwd === playerPasswd) {
+          ws.send(JSON.stringify({ type: 'reconnect', message: 'Reconexion exitosa' }));
+          connectedClientsMap.set(playerName, { ws, playerId: loginPlayerName._id });
+          notifyAllClients("connectedPlayers", connectedUsers);
+          const mensajeReconexion = `Se reconecto ${playerName}`;
+          await enviarNotificacionDiscord(mensajeReconexion);
+          updateAndSendScores();
+      } else {
+          ws.send(JSON.stringify({ type: 'error', message: 'Nombre de usuario o contraseña incorrecto' }));
+      }
       } else {
         connectedUserName = parsedMessage.nickname;
-
-
-
         const newPlayer = new Player({
           id: new mongoose.Types.ObjectId(),
           name: playerName,
+          passwd: playerPasswd
         });
-
+        const mensajeReconexion = `Se conecto ${playerName}`;
+        await enviarNotificacionDiscord(mensajeReconexion);
         connectedUsers.push(newPlayer);
         await newPlayer.save();
         connectedClientsMap.set(parsedMessage.nickname, { ws, playerId: newPlayer._id });
         notificarNuevoPlayer(newPlayer)
-        console.log('Nuevo jugador guardado en la base de datos:', playerName);
+        ws.send(JSON.stringify({ type: 'register', message: 'Jugador registrado' }));
         notifyAllClients("connectedPlayers", connectedUsers);
 
-          
-        const jugadores = await schemas.Player.find({}, "name score");
-        const jugador = jugadores.map(jugador => ({ name: jugador.name, score: jugador.score }));
-
-        const jugadoress = await schemas.Player.find({}, "name");
-        const jugadorr = jugadoress.map(jugador => ({ name: jugador.name }));
-
-        const scores = `event: scores\n` + `data: ${JSON.stringify(jugador)}\n\n`;
-        const playIn = `event: playIn\n` + `data: ${JSON.stringify(jugadorr)}\n\n`;
-
-        for (let client of allClients) {
-          client.write(scores);
-          client.write(playIn)
-      }
+        updateAndSendScores();
       }
     }
     switch (parsedMessage.action) {
@@ -205,10 +199,10 @@ wss.on('connection', (ws: WebSocket) => {
         if (userSession) {
           if (usuarioConectado) {
             const nivelUsuario = usuarioConectado.level;
-            console.log("Nivel del usuario:", nivelUsuario);
 
-            generatedKeys = generateLevelData(nivelUsuario).keys;
-            generatedScore = generateLevelData(nivelUsuario).score;
+            const { keys, score } = generateLevelData(nivelUsuario);
+            generatedKeys = keys;
+            generatedScore = score;
 
             ws.send(JSON.stringify({
               event: "startGaming",
@@ -223,10 +217,12 @@ wss.on('connection', (ws: WebSocket) => {
         case "checKeys":
           const pressedKeysString = JSON.stringify(parsedMessage.keys);
           const generatedKeysString = JSON.stringify(generatedKeys);
+
           const Session = connectedClientsMap.get(connectedUserName);
 
           let updatedLives = 0;
-        
+          let updatedLevel = 0;
+          let updatedScore = 0;
           if (pressedKeysString === generatedKeysString) {
             if (Session) {
               await schemas.Player.updateOne(
@@ -234,37 +230,36 @@ wss.on('connection', (ws: WebSocket) => {
                 { $inc: { score: generatedScore, level: 1 } }
               );
         
-              console.log('Puntuación y nivel actualizados para el usuario:', connectedUserName);
+                // Obtener el usuario actualizado
               const updatedUser = await schemas.Player.findById(Session.playerId);
               updatedLives = updatedUser ? updatedUser.lives : 0;
+              updatedLevel = updatedUser ? updatedUser.level : 0;
             } else {
               console.log('Las teclas coinciden pero el usuario no está registrado.');
             }
           } else {
             if (Session) {
-              console.log('Las teclas no coinciden. Se restará una vida al usuario.');
               // Reducir una vida del usuario
               await schemas.Player.updateOne(
                 { _id: Session.playerId },
-                { $inc: { lives: -1} } // Decrementar en 1 la cantidad de vidas
+                { $inc: { lives: -1} }
               );
-
-              // Obtener la cantidad actualizada de vidas del usuario
               const updatedUser = await schemas.Player.findById(Session.playerId);
               updatedLives = updatedUser ? updatedUser.lives : 0;
-
-              console.log('Cantidad de vidas actualizada para el usuario:', connectedUserName);
+              updatedLevel = updatedUser ? updatedUser.level : 0;
+              updatedScore = updatedUser ? updatedUser.score : 0;
             } else {
               console.log('Las teclas no coinciden o el usuario no está registrado.');
             }
             
           }
+          const mensajeReconexion = `${connectedUserName} con ${updatedLives} vidas`;
+          await enviarNotificacionDiscord(mensajeReconexion);
           ws.send(JSON.stringify({
             event: "lives-",
             data: { lives: updatedLives }
-          }));
-          // Enviar la cantidad actualizada de vidas al cliente
-          
+          }));          
+          updateAndSendScores();
           break;
 
       case "lives":
@@ -286,7 +281,7 @@ wss.on('connection', (ws: WebSocket) => {
 
   });
 
-  ws.on('close', () => {
+  ws.on('close', async () => {
     console.log("Cliente desconectado.");
     connectedClients--;
     const userSession = connectedClientsMap.get(connectedUserName);
@@ -295,6 +290,8 @@ wss.on('connection', (ws: WebSocket) => {
       if (disconnectedUserIndex !== -1) {
         connectedUsers.splice(disconnectedUserIndex, 1);
         notifyAllClients("connectedPlayers", connectedUsers);
+        const mensajeReconexion = `${connectedUserName} se desconecto`;
+        await enviarNotificacionDiscord(mensajeReconexion);
       } else {
         console.log("Usuario no encontrado en la lista de usuarios conectados.");
       }
@@ -315,7 +312,28 @@ const notifyAllClients = (event: string, data: any) => {
   });
 };
 
-export let nivelUsuario: number;
+const updateAndSendScores = async () => {
+  try {
+      const jugadoress = await schemas.Player.find({}, "name score");
+      const jugadorr = jugadoress.map(jugador => ({ name: jugador.name, score: jugador.score }));
+
+      const scores = `event: scores\n` + `data: ${JSON.stringify(jugadoress)}\n\n`;
+      const playIn = `event: playIn\n` + `data: ${JSON.stringify(jugadorr)}\n\n`;
+
+      for (let client of allClients) {
+          client.write(scores);
+          client.write(playIn);
+      }
+  } catch (error) {
+      console.error("Error al actualizar y enviar los datos de los jugadores:", error);
+  }
+};
+const enviarNotificacionDiscord = async (mensaje:String) => {
+  const webhookUrl = 'https://discord.com/api/webhooks/1252772820145012837/rta89Wa-cY4NQeOXEakOiBWHvDespeS71yqlA_Vn2A7yFnz3K4XX1dNbvU22egD5hzE6';
+  await axios.post(webhookUrl, {
+      content: mensaje
+  });
+};
 
 server.listen(desiredPort, () => {
   console.log(`Server running in port:  ${desiredPort}`);
