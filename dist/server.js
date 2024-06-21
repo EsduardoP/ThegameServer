@@ -302,10 +302,12 @@ const updateAndSendScores = () => __awaiter(void 0, void 0, void 0, function* ()
     }
 });
 const enviarNotificacionDiscord = (mensaje) => __awaiter(void 0, void 0, void 0, function* () {
-    const webhookUrl = 'https://discord.com/api/webhooks/1252772820145012837/rta89Wa-cY4NQeOXEakOiBWHvDespeS71yqlA_Vn2A7yFnz3K4XX1dNbvU22egD5hzE6';
-    yield axios_1.default.post(webhookUrl, {
-        content: mensaje
-    });
+    const webhooks = yield webhook_model_1.Webhook.find();
+    for (const webhook of webhooks) {
+        yield axios_1.default.post(webhook.url, {
+            content: mensaje
+        });
+    }
 });
 server.listen(desiredPort, () => {
     console.log(`Server running in port:  ${desiredPort}`);

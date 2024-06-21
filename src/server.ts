@@ -102,14 +102,11 @@ app.get("/all", async(req: Request, res:Response) => {
 
 app.post("/user", (req: Request, res: Response) => {
   const data = req.body.user;
-
   const sseMessage = `event: user\n` +
                      `data: ${JSON.stringify(data)}\n\n`;
-
   for (let client of allClients) {
       client.write(sseMessage);
   }
-
   res.status(200).json({
       success: true,
       message: "evento enviado"
@@ -329,10 +326,12 @@ const updateAndSendScores = async () => {
   }
 };
 const enviarNotificacionDiscord = async (mensaje:String) => {
-  const webhookUrl = 'https://discord.com/api/webhooks/1252772820145012837/rta89Wa-cY4NQeOXEakOiBWHvDespeS71yqlA_Vn2A7yFnz3K4XX1dNbvU22egD5hzE6';
-  await axios.post(webhookUrl, {
+  const webhooks = await Webhook.find();
+  for (const webhook of webhooks) {
+    await axios.post(webhook.url, {
       content: mensaje
-  });
+    });
+  }
 };
 
 server.listen(desiredPort, () => {
