@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import axios from 'axios';
-import { Player, ConnectedUser } from './models/Interfaces'; 
+import { ConnectedUser } from './models/Interfaces'; 
 import { generateLevelData } from './models/secuences.model';
 import { connectDB } from './db';
 import mongoose from 'mongoose';
@@ -31,6 +31,8 @@ const allClients: Response[] = [];
 
 let connectedClientsMap = new Map<string, { ws: WebSocket, playerId: mongoose.Types.ObjectId }>();
 const connectedUsers: ConnectedUser[] = [];
+
+
 let generatedKeys: string[] = [];
 let generatedScore: number;
 
@@ -75,16 +77,6 @@ app.get("/nuevo-player", (req: Request, res: Response) => {
   playerPendientes.push(res);
 });
 
-function notificarNuevoPlayer(newPlayer: mongoose.Document & Player) {
-  for (let res of playerPendientes) {
-    res.status(200).json({
-      success: true,
-      newPlayer
-    });
-  }
-  playerPendientes = [];
-  notifyAllClients("connectedPlayers", connectedUsers);
-}
 
 // SSE
 app.get("/all", async(req: Request, res:Response) => {
@@ -99,19 +91,6 @@ app.get("/all", async(req: Request, res:Response) => {
   });
 
 })
-
-app.post("/user", (req: Request, res: Response) => {
-  const data = req.body.user;
-  const sseMessage = `event: user\n` +
-                     `data: ${JSON.stringify(data)}\n\n`;
-  for (let client of allClients) {
-      client.write(sseMessage);
-  }
-  res.status(200).json({
-      success: true,
-      message: "evento enviado"
-  });
-});
 
 
 //WEBHOOKS
@@ -139,43 +118,56 @@ wss.on('connection', (ws: WebSocket) => {
     return;
   }
   connectedClients++;
-  console.log("Clientes conectados:", connectedClients);
-  notifyAllClients("connectedPlayers", connectedUsers);
 
   // Variable local para almacenar el nombre de usuario conectado en esta sesión
-  let connectedUserName = '';
+  let playerName = '';
 
   ws.on('message', async (data: string) => {
     const parsedMessage = JSON.parse(data);
     if (parsedMessage.type === 'player') {
-      const playerName = parsedMessage.nickname;
+      playerName = parsedMessage.nickname;
       const playerPasswd = parsedMessage.passwd
-      // Verificar si el usuario ya está registrado
       const loginPlayerName = await Player.findOne({ name: playerName }).exec();
+
       if (loginPlayerName) {
         if (loginPlayerName.passwd === playerPasswd) {
           ws.send(JSON.stringify({ type: 'reconnect', message: 'Reconexion exitosa' }));
+
           connectedClientsMap.set(playerName, { ws, playerId: loginPlayerName._id });
+
+          const connectedUser = {
+            id: loginPlayerName._id.toString(),
+            name: loginPlayerName.name
+          };
+          connectedUsers.push(connectedUser)
+
+
           notifyAllClients("connectedPlayers", connectedUsers);
+
           const mensajeReconexion = `Se reconecto ${playerName}`;
           await enviarNotificacionDiscord(mensajeReconexion);
+
           updateAndSendScores();
-      } else {
+        } else {
           ws.send(JSON.stringify({ type: 'error', message: 'Nombre de usuario o contraseña incorrecto' }));
-      }
+        }
       } else {
-        connectedUserName = parsedMessage.nickname;
         const newPlayer = new Player({
-          id: new mongoose.Types.ObjectId(),
           name: playerName,
           passwd: playerPasswd
         });
-        const mensajeReconexion = `Se conecto ${playerName}`;
-        await enviarNotificacionDiscord(mensajeReconexion);
-        connectedUsers.push(newPlayer);
         await newPlayer.save();
-        connectedClientsMap.set(parsedMessage.nickname, { ws, playerId: newPlayer._id });
-        notificarNuevoPlayer(newPlayer)
+        connectedClientsMap.set(playerName, { ws, playerId: newPlayer._id });
+
+        const mensajeReconexion = `Se registro ${playerName}`;
+        await enviarNotificacionDiscord(mensajeReconexion);
+
+        const connectedUser = {
+          id: newPlayer._id.toString(),
+          name: newPlayer.name
+        };
+        connectedUsers.push(connectedUser);
+        
         ws.send(JSON.stringify({ type: 'register', message: 'Jugador registrado' }));
         notifyAllClients("connectedPlayers", connectedUsers);
 
@@ -191,8 +183,8 @@ wss.on('connection', (ws: WebSocket) => {
         break;
 
       case "startGaming":
-        const usuarioConectado = await schemas.Player.findOne({ name: connectedUserName });
-        const userSession = connectedClientsMap.get(connectedUserName);
+        const usuarioConectado = await schemas.Player.findOne({ name: playerName });
+        const userSession = connectedClientsMap.get(playerName);
         if (userSession) {
           if (usuarioConectado) {
             const nivelUsuario = usuarioConectado.level;
@@ -215,7 +207,7 @@ wss.on('connection', (ws: WebSocket) => {
           const pressedKeysString = JSON.stringify(parsedMessage.keys);
           const generatedKeysString = JSON.stringify(generatedKeys);
 
-          const Session = connectedClientsMap.get(connectedUserName);
+          const Session = connectedClientsMap.get(playerName);
 
           let updatedLives = 0;
           let updatedLevel = 0;
@@ -250,7 +242,7 @@ wss.on('connection', (ws: WebSocket) => {
             }
             
           }
-          const mensajeReconexion = `${connectedUserName} con ${updatedLives} vidas`;
+          const mensajeReconexion = `${playerName} con ${updatedLives} vidas`;
           await enviarNotificacionDiscord(mensajeReconexion);
           ws.send(JSON.stringify({
             event: "lives-",
@@ -260,15 +252,18 @@ wss.on('connection', (ws: WebSocket) => {
           break;
 
       case "lives":
-        const userLivesSession = connectedClientsMap.get(connectedUserName);
+        const userLivesSession = connectedClientsMap.get(playerName);
         if (userLivesSession) {
           const usuarioConectado = await schemas.Player.findById(userLivesSession.playerId);
           if (usuarioConectado) {
+            if (usuarioConectado.lives === 3) {
+              ws.send(JSON.stringify({
+                event: "lives",
+                data: { lives: usuarioConectado.lives }
+              }));
+            }
+
             
-            ws.send(JSON.stringify({
-              event: "lives",
-              data: { lives: usuarioConectado.lives }
-            }));
           } else {
             console.log("Usuario no encontrado en la base de datos");
           }
@@ -281,18 +276,20 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('close', async () => {
     console.log("Cliente desconectado.");
     connectedClients--;
-    const userSession = connectedClientsMap.get(connectedUserName);
+    const userSession = connectedClientsMap.get(playerName);
     if (userSession) {
-      const disconnectedUserIndex = connectedUsers.findIndex(user => user.name === connectedUserName);
+      const disconnectedUserIndex = connectedUsers.findIndex(user => user.name === playerName);
       if (disconnectedUserIndex !== -1) {
         connectedUsers.splice(disconnectedUserIndex, 1);
         notifyAllClients("connectedPlayers", connectedUsers);
-        const mensajeReconexion = `${connectedUserName} se desconecto`;
+
+        const mensajeReconexion = `${playerName} se desconecto`;
         await enviarNotificacionDiscord(mensajeReconexion);
+
       } else {
         console.log("Usuario no encontrado en la lista de usuarios conectados.");
       }
-      connectedClientsMap.delete(connectedUserName);
+      connectedClientsMap.delete(playerName);
     } else {
       console.log("Sesión de usuario no encontrada.");
     }
@@ -304,22 +301,17 @@ const notifyAllClients = (event: string, data: any) => {
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify({ event, data }));
-      console.log("cantidad de usuarios", connectedClients)
+      console.log("Clientes conectados", connectedClients)
     }
   });
 };
 
 const updateAndSendScores = async () => {
   try {
-      const jugadoress = await schemas.Player.find({}, "name score");
-      const jugadorr = jugadoress.map(jugador => ({ name: jugador.name, score: jugador.score }));
-
-      const scores = `event: scores\n` + `data: ${JSON.stringify(jugadoress)}\n\n`;
-      const playIn = `event: playIn\n` + `data: ${JSON.stringify(jugadorr)}\n\n`;
-
+      const jugador = await schemas.Player.find({}, "name score level");
+      const infoPlayer = `event: infoPlayer\n` + `data: ${JSON.stringify(jugador)}\n\n`;
       for (let client of allClients) {
-          client.write(scores);
-          client.write(playIn);
+          client.write(infoPlayer);
       }
   } catch (error) {
       console.error("Error al actualizar y enviar los datos de los jugadores:", error);

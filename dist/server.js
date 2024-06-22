@@ -16,7 +16,6 @@ const express_1 = __importDefault(require("express"));
 const axios_1 = __importDefault(require("axios"));
 const secuences_model_1 = require("./models/secuences.model");
 const db_1 = require("./db");
-const mongoose_1 = __importDefault(require("mongoose"));
 const player_model_1 = __importDefault(require("./models/player.model"));
 const webhook_model_1 = require("./models/webhook.model");
 const { Player } = player_model_1.default;
@@ -76,16 +75,6 @@ app.get('/allPlayers', (req, res) => __awaiter(void 0, void 0, void 0, function*
 app.get("/nuevo-player", (req, res) => {
     playerPendientes.push(res);
 });
-function notificarNuevoPlayer(newPlayer) {
-    for (let res of playerPendientes) {
-        res.status(200).json({
-            success: true,
-            newPlayer
-        });
-    }
-    playerPendientes = [];
-    notifyAllClients("connectedPlayers", connectedUsers);
-}
 // SSE
 app.get("/all", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     res.setHeader('Content-Type', 'text/event-stream');
@@ -96,18 +85,6 @@ app.get("/all", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
         res.end();
     });
 }));
-app.post("/user", (req, res) => {
-    const data = req.body.user;
-    const sseMessage = `event: user\n` +
-        `data: ${JSON.stringify(data)}\n\n`;
-    for (let client of allClients) {
-        client.write(sseMessage);
-    }
-    res.status(200).json({
-        success: true,
-        message: "evento enviado"
-    });
-});
 //WEBHOOKS
 app.post('/webhooks', (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const url = req.body.webhook;
@@ -131,21 +108,23 @@ wss.on('connection', (ws) => {
         return;
     }
     connectedClients++;
-    console.log("Clientes conectados:", connectedClients);
-    notifyAllClients("connectedPlayers", connectedUsers);
     // Variable local para almacenar el nombre de usuario conectado en esta sesión
-    let connectedUserName = '';
+    let playerName = '';
     ws.on('message', (data) => __awaiter(void 0, void 0, void 0, function* () {
         const parsedMessage = JSON.parse(data);
         if (parsedMessage.type === 'player') {
-            const playerName = parsedMessage.nickname;
+            playerName = parsedMessage.nickname;
             const playerPasswd = parsedMessage.passwd;
-            // Verificar si el usuario ya está registrado
             const loginPlayerName = yield Player.findOne({ name: playerName }).exec();
             if (loginPlayerName) {
                 if (loginPlayerName.passwd === playerPasswd) {
                     ws.send(JSON.stringify({ type: 'reconnect', message: 'Reconexion exitosa' }));
                     connectedClientsMap.set(playerName, { ws, playerId: loginPlayerName._id });
+                    const connectedUser = {
+                        id: loginPlayerName._id.toString(),
+                        name: loginPlayerName.name
+                    };
+                    connectedUsers.push(connectedUser);
                     notifyAllClients("connectedPlayers", connectedUsers);
                     const mensajeReconexion = `Se reconecto ${playerName}`;
                     yield enviarNotificacionDiscord(mensajeReconexion);
@@ -156,18 +135,19 @@ wss.on('connection', (ws) => {
                 }
             }
             else {
-                connectedUserName = parsedMessage.nickname;
                 const newPlayer = new Player({
-                    id: new mongoose_1.default.Types.ObjectId(),
                     name: playerName,
                     passwd: playerPasswd
                 });
-                const mensajeReconexion = `Se conecto ${playerName}`;
-                yield enviarNotificacionDiscord(mensajeReconexion);
-                connectedUsers.push(newPlayer);
                 yield newPlayer.save();
-                connectedClientsMap.set(parsedMessage.nickname, { ws, playerId: newPlayer._id });
-                notificarNuevoPlayer(newPlayer);
+                connectedClientsMap.set(playerName, { ws, playerId: newPlayer._id });
+                const mensajeReconexion = `Se registro ${playerName}`;
+                yield enviarNotificacionDiscord(mensajeReconexion);
+                const connectedUser = {
+                    id: newPlayer._id.toString(),
+                    name: newPlayer.name
+                };
+                connectedUsers.push(connectedUser);
                 ws.send(JSON.stringify({ type: 'register', message: 'Jugador registrado' }));
                 notifyAllClients("connectedPlayers", connectedUsers);
                 updateAndSendScores();
@@ -181,8 +161,8 @@ wss.on('connection', (ws) => {
                 }));
                 break;
             case "startGaming":
-                const usuarioConectado = yield player_model_1.default.Player.findOne({ name: connectedUserName });
-                const userSession = connectedClientsMap.get(connectedUserName);
+                const usuarioConectado = yield player_model_1.default.Player.findOne({ name: playerName });
+                const userSession = connectedClientsMap.get(playerName);
                 if (userSession) {
                     if (usuarioConectado) {
                         const nivelUsuario = usuarioConectado.level;
@@ -202,7 +182,7 @@ wss.on('connection', (ws) => {
             case "checKeys":
                 const pressedKeysString = JSON.stringify(parsedMessage.keys);
                 const generatedKeysString = JSON.stringify(generatedKeys);
-                const Session = connectedClientsMap.get(connectedUserName);
+                const Session = connectedClientsMap.get(playerName);
                 let updatedLives = 0;
                 let updatedLevel = 0;
                 let updatedScore = 0;
@@ -231,7 +211,7 @@ wss.on('connection', (ws) => {
                         console.log('Las teclas no coinciden o el usuario no está registrado.');
                     }
                 }
-                const mensajeReconexion = `${connectedUserName} con ${updatedLives} vidas`;
+                const mensajeReconexion = `${playerName} con ${updatedLives} vidas`;
                 yield enviarNotificacionDiscord(mensajeReconexion);
                 ws.send(JSON.stringify({
                     event: "lives-",
@@ -240,14 +220,16 @@ wss.on('connection', (ws) => {
                 updateAndSendScores();
                 break;
             case "lives":
-                const userLivesSession = connectedClientsMap.get(connectedUserName);
+                const userLivesSession = connectedClientsMap.get(playerName);
                 if (userLivesSession) {
                     const usuarioConectado = yield player_model_1.default.Player.findById(userLivesSession.playerId);
                     if (usuarioConectado) {
-                        ws.send(JSON.stringify({
-                            event: "lives",
-                            data: { lives: usuarioConectado.lives }
-                        }));
+                        if (usuarioConectado.lives === 3) {
+                            ws.send(JSON.stringify({
+                                event: "lives",
+                                data: { lives: usuarioConectado.lives }
+                            }));
+                        }
                     }
                     else {
                         console.log("Usuario no encontrado en la base de datos");
@@ -259,19 +241,19 @@ wss.on('connection', (ws) => {
     ws.on('close', () => __awaiter(void 0, void 0, void 0, function* () {
         console.log("Cliente desconectado.");
         connectedClients--;
-        const userSession = connectedClientsMap.get(connectedUserName);
+        const userSession = connectedClientsMap.get(playerName);
         if (userSession) {
-            const disconnectedUserIndex = connectedUsers.findIndex(user => user.name === connectedUserName);
+            const disconnectedUserIndex = connectedUsers.findIndex(user => user.name === playerName);
             if (disconnectedUserIndex !== -1) {
                 connectedUsers.splice(disconnectedUserIndex, 1);
                 notifyAllClients("connectedPlayers", connectedUsers);
-                const mensajeReconexion = `${connectedUserName} se desconecto`;
+                const mensajeReconexion = `${playerName} se desconecto`;
                 yield enviarNotificacionDiscord(mensajeReconexion);
             }
             else {
                 console.log("Usuario no encontrado en la lista de usuarios conectados.");
             }
-            connectedClientsMap.delete(connectedUserName);
+            connectedClientsMap.delete(playerName);
         }
         else {
             console.log("Sesión de usuario no encontrada.");
@@ -282,19 +264,16 @@ const notifyAllClients = (event, data) => {
     wss.clients.forEach(client => {
         if (client.readyState === ws_1.WebSocket.OPEN) {
             client.send(JSON.stringify({ event, data }));
-            console.log("cantidad de usuarios", connectedClients);
+            console.log("Clientes conectados", connectedClients);
         }
     });
 };
 const updateAndSendScores = () => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const jugadoress = yield player_model_1.default.Player.find({}, "name score");
-        const jugadorr = jugadoress.map(jugador => ({ name: jugador.name, score: jugador.score }));
-        const scores = `event: scores\n` + `data: ${JSON.stringify(jugadoress)}\n\n`;
-        const playIn = `event: playIn\n` + `data: ${JSON.stringify(jugadorr)}\n\n`;
+        const jugador = yield player_model_1.default.Player.find({}, "name score level");
+        const infoPlayer = `event: infoPlayer\n` + `data: ${JSON.stringify(jugador)}\n\n`;
         for (let client of allClients) {
-            client.write(scores);
-            client.write(playIn);
+            client.write(infoPlayer);
         }
     }
     catch (error) {

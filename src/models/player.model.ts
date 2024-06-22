@@ -1,7 +1,6 @@
 import mongoose from 'mongoose';
 
 const playerSchema = new mongoose.Schema({
-    id: { type: String, required: true },
     name: { type: String, required: true, trim: true, unique: true },
     passwd: {type:String, required: true, trim:true, uniqued: true},
     score: { type: Number, default: 0 },
